@@ -39,8 +39,8 @@ use crate::ProcessingState;
 use crate::Res;
 use crate::utils::decibels::linear_to_db_inplace;
 use crate::{
-    CaptureStatus, PlaybackStatus, ProcessingParameters, ProcessingStatus, StopReason,
-    list_available_devices, list_supported_devices,
+    CaptureStatus, PlaybackStatus, ProcessingParameters, ProcessingStatus, SpectrumStatus,
+    StopReason, list_available_devices, list_supported_devices,
 };
 use crate::{ControllerMessage, config};
 
@@ -54,6 +54,7 @@ pub struct SharedData {
     pub playback_status: Arc<RwLock<PlaybackStatus>>,
     pub processing_params: Arc<ProcessingParameters>,
     pub processing_status: Arc<RwLock<ProcessingStatus>>,
+    pub spectrum_status: Arc<RwLock<SpectrumStatus>>,
     pub state_change_notify: crossbeam_channel::Sender<()>,
     pub state_file_path: Option<String>,
     pub unsaved_state_change: Arc<AtomicBool>,
@@ -65,6 +66,14 @@ pub struct LocalData {
     pub last_cap_peak_time: Instant,
     pub last_pb_rms_time: Instant,
     pub last_pb_peak_time: Instant,
+    // Per-connection analysis subscriptions (see `AnalysisTopic`, `push_analysis_frames`).
+    // `last_spectrum_seq` dedupes against `SpectrumStatus::seq` so an unchanged frame
+    // isn't resent; energy has no equivalent status struct to compare against, so it's
+    // just pushed on every poll tick while subscribed.
+    pub subscribed_spectrum: bool,
+    pub subscribed_energy: bool,
+    pub last_spectrum_seq: u64,
+    pub energy_seq: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -84,8 +93,25 @@ enum ValueWithOptionalLimits {
     Limited(f32, f32, f32),
 }
 
+/// A topic a client can `Subscribe`/`Unsubscribe` to for pushed `AnalysisFrame`-style
+/// replies (`WsReply::SpectrumFrame`, `WsReply::EnergyFrame`), instead of polling.
+/// `Spectrum`'s fields are optional overrides of `SpectrumStatus`'s defaults, applied
+/// on subscribe; `Energy` has none, it just starts pushing `playback_status`'s existing
+/// rms/peak. See `ANALYSIS-API-PLAN.md` for the design this implements.
+#[derive(Debug, PartialEq, Clone, Deserialize)]
+enum AnalysisTopic {
+    Spectrum {
+        num_bins: Option<usize>,
+        fmin: Option<f32>,
+        fmax: Option<f32>,
+    },
+    Energy,
+}
+
 #[derive(Debug, PartialEq, Deserialize)]
 enum WsCommand {
+    Subscribe(Vec<AnalysisTopic>),
+    Unsubscribe(Vec<AnalysisTopic>),
     SetConfigFilePath(String),
     SetConfig(String),
     SetConfigJson(String),
@@ -199,6 +225,23 @@ struct Fader {
 
 #[derive(Debug, PartialEq, Serialize)]
 enum WsReply {
+    Subscribe {
+        result: WsResult,
+    },
+    Unsubscribe {
+        result: WsResult,
+    },
+    // Pushed, not sent in response to a command — see `push_analysis_frames`. Identified
+    // on the wire by having no `result` field, unlike every command reply above/below.
+    SpectrumFrame {
+        seq: u64,
+        bins_db: Vec<f32>,
+    },
+    EnergyFrame {
+        seq: u64,
+        rms_db: Vec<f32>,
+        peak_db: Vec<f32>,
+    },
     SetConfigFilePath {
         result: WsResult,
     },
@@ -543,6 +586,10 @@ pub fn start_server(parameters: ServerParameters, shared_data: SharedData) {
                     last_cap_rms_time: now,
                     last_pb_peak_time: now,
                     last_pb_rms_time: now,
+                    subscribed_spectrum: false,
+                    subscribed_energy: false,
+                    last_spectrum_seq: 0,
+                    energy_seq: 0,
                 };
                 #[cfg(feature = "secure-websocket")]
                 let acceptor_inst = acceptor.clone();
@@ -568,6 +615,76 @@ pub fn start_server(parameters: ServerParameters, shared_data: SharedData) {
             error!("Failed to start websocket server: {err}");
         }
     });
+}
+
+// The websocket loop below is a plain blocking read per connection, same as upstream.
+// Pushing unsolicited `AnalysisFrame`-style replies (see `push_analysis_frames`) onto
+// that same blocking read needs the read to periodically return control even with no
+// incoming message, which means giving the underlying stream a read timeout. Doing
+// that unconditionally would add up to 100ms of latency to every command response on
+// every connection, including ones that never touch Subscribe — so the timeout is only
+// armed once a connection has at least one active subscription, and lifted again once
+// it has none. No subscriptions ever active anywhere: this trait is called, but every
+// call is a no-op `set_read_timeout(None)`, and behavior is byte-for-byte what it was
+// before this feature existed.
+trait SetSocketReadTimeout {
+    fn analysis_set_read_timeout(&self, dur: Option<Duration>) -> std::io::Result<()>;
+}
+
+impl SetSocketReadTimeout for TcpStream {
+    fn analysis_set_read_timeout(&self, dur: Option<Duration>) -> std::io::Result<()> {
+        self.set_read_timeout(dur)
+    }
+}
+
+#[cfg(feature = "secure-websocket")]
+impl SetSocketReadTimeout for TlsStream<TcpStream> {
+    fn analysis_set_read_timeout(&self, dur: Option<Duration>) -> std::io::Result<()> {
+        self.get_ref().set_read_timeout(dur)
+    }
+}
+
+const ANALYSIS_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Pushes one `SpectrumFrame`/`EnergyFrame` per subscribed topic on this connection, if
+/// there's anything new. Spectrum dedupes against `SpectrumStatus::seq` — the FFT runs
+/// once per audio chunk (~20ms at typical settings) but this is only polled every
+/// `ANALYSIS_POLL_INTERVAL`, so most polls have nothing new to send. Energy has no
+/// underlying seq counter to compare against (it's just `playback_status`'s existing
+/// rms/peak, unchanged by this feature) so it's sent unconditionally on every poll
+/// while subscribed. Returns `false` if the connection should be closed.
+fn push_analysis_frames<S: std::io::Read + std::io::Write>(
+    websocket: &mut WebSocket<S>,
+    shared_data_inst: &SharedData,
+    local_data: &mut LocalData,
+) -> bool {
+    if local_data.subscribed_spectrum {
+        let (seq, bins_db) = {
+            let status = shared_data_inst.spectrum_status.read();
+            (status.seq, status.bins_db.clone())
+        };
+        if seq != local_data.last_spectrum_seq {
+            local_data.last_spectrum_seq = seq;
+            let rep = WsReply::SpectrumFrame { seq, bins_db };
+            if let Err(err) = websocket.send(Message::text(serde_json::to_string(&rep).unwrap())) {
+                warn!("Failed to write spectrum frame: {}", err);
+                return false;
+            }
+        }
+    }
+    if local_data.subscribed_energy {
+        local_data.energy_seq = local_data.energy_seq.wrapping_add(1);
+        let rep = WsReply::EnergyFrame {
+            seq: local_data.energy_seq,
+            rms_db: playback_signal_rms(shared_data_inst),
+            peak_db: playback_signal_peak(shared_data_inst),
+        };
+        if let Err(err) = websocket.send(Message::text(serde_json::to_string(&rep).unwrap())) {
+            warn!("Failed to write energy frame: {}", err);
+            return false;
+        }
+    }
+    true
 }
 
 macro_rules! make_handler {
@@ -602,6 +719,14 @@ macro_rules! make_handler {
                                 debug!("Sending no reply");
                             }
                         }
+                        // No incoming message within the read timeout (only armed while
+                        // subscribed, see `SetSocketReadTimeout` above) — not an error,
+                        // fall through to the push step below.
+                        Err(tungstenite::error::Error::Io(ref e))
+                            if matches!(
+                                e.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            ) => {}
                         Err(tungstenite::error::Error::ConnectionClosed) => {
                             debug!("Connection was closed");
                             break;
@@ -610,6 +735,15 @@ macro_rules! make_handler {
                             warn!("Lost connection: {}", err);
                             break;
                         }
+                    }
+                    let subscribed = local_data.subscribed_spectrum || local_data.subscribed_energy;
+                    let _ = websocket
+                        .get_ref()
+                        .analysis_set_read_timeout(subscribed.then_some(ANALYSIS_POLL_INTERVAL));
+                    if subscribed
+                        && !push_analysis_frames(&mut websocket, &shared_data_inst, &mut local_data)
+                    {
+                        break;
                     }
                 },
                 Err(err) => warn!("Connection failed: {}", err),
@@ -1635,6 +1769,55 @@ fn handle_command(
             Some(WsReply::GetResamplerLoad {
                 result: WsResult::Ok,
                 value: load,
+            })
+        }
+        WsCommand::Subscribe(topics) => {
+            for topic in topics {
+                match topic {
+                    AnalysisTopic::Spectrum {
+                        num_bins,
+                        fmin,
+                        fmax,
+                    } => {
+                        let mut status = shared_data_inst.spectrum_status.write();
+                        status.active = true;
+                        if let Some(n) = num_bins {
+                            status.num_bins = n;
+                        }
+                        if let Some(f) = fmin {
+                            status.fmin = f;
+                        }
+                        if let Some(f) = fmax {
+                            status.fmax = f;
+                        }
+                        local_data.subscribed_spectrum = true;
+                    }
+                    AnalysisTopic::Energy => {
+                        local_data.subscribed_energy = true;
+                    }
+                }
+            }
+            Some(WsReply::Subscribe {
+                result: WsResult::Ok,
+            })
+        }
+        WsCommand::Unsubscribe(topics) => {
+            for topic in topics {
+                match topic {
+                    // Single-client assumption (see ANALYSIS-API-PLAN.md): unsubscribing
+                    // turns the FFT off outright rather than reference-counting
+                    // subscribers, since there's only ever this one connection.
+                    AnalysisTopic::Spectrum { .. } => {
+                        local_data.subscribed_spectrum = false;
+                        shared_data_inst.spectrum_status.write().active = false;
+                    }
+                    AnalysisTopic::Energy => {
+                        local_data.subscribed_energy = false;
+                    }
+                }
+            }
+            Some(WsReply::Unsubscribe {
+                result: WsResult::Ok,
             })
         }
         WsCommand::None => None,

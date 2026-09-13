@@ -15,12 +15,14 @@
 // <https://www.gnu.org/licenses/> and <https://www.mozilla.org/MPL/2.0/>.
 
 use crate::ProcessingParameters;
+use crate::SpectrumStatus;
 use crate::audiodevice::*;
 use crate::config;
 use crate::pipeline;
 use audio_thread_priority::{
     demote_current_thread_from_real_time, promote_current_thread_to_real_time,
 };
+use parking_lot::RwLock;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -31,10 +33,26 @@ pub fn run_processing(
     rx_cap: crossbeam_channel::Receiver<AudioMessage>,
     rx_pipeconf: crossbeam_channel::Receiver<(config::ConfigChange, config::Configuration)>,
     processing_params: Arc<ProcessingParameters>,
+    spectrum_status: Arc<RwLock<SpectrumStatus>>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let chunksize = conf_proc.devices.chunksize;
         let samplerate = conf_proc.devices.samplerate;
+        // Spectrum FFT: planned once here (thread-local, no lock contention) and reused
+        // every chunk. Only the small resulting `bins_db` snapshot crosses the lock in
+        // `update_spectrum_status`. Chunksize is fixed for the life of this thread — a
+        // device-type config change tears this thread down and a new one is spawned.
+        let mut spectrum_planner = realfft::RealFftPlanner::<crate::PrcFmt>::new();
+        let spectrum_fft = spectrum_planner.plan_fft_forward(chunksize);
+        let spectrum_window: Vec<crate::PrcFmt> = (0..chunksize)
+            .map(|i| {
+                let x = 2.0 * std::f64::consts::PI * i as f64 / (chunksize as f64 - 1.0);
+                (0.5 - 0.5 * x.cos()) as crate::PrcFmt
+            })
+            .collect();
+        let mut spectrum_mono = spectrum_fft.make_input_vec();
+        let mut spectrum_output = spectrum_fft.make_output_vec();
+        let mut spectrum_scratch = spectrum_fft.make_scratch_vec();
         let multithreaded = conf_proc.devices.multithreaded();
         let nbr_threads = conf_proc.devices.worker_threads();
         let hw_threads = std::thread::available_parallelism()
@@ -117,6 +135,16 @@ pub fn run_processing(
                 Ok(AudioMessage::Audio(mut chunk)) => {
                     //trace!("AudioMessage::Audio received");
                     chunk = pipeline.process_chunk(chunk);
+                    crate::update_spectrum_status(
+                        &spectrum_status,
+                        spectrum_fft.as_ref(),
+                        &spectrum_window,
+                        &mut spectrum_mono,
+                        &mut spectrum_output,
+                        &mut spectrum_scratch,
+                        &chunk.waveforms,
+                        samplerate,
+                    );
                     let msg = AudioMessage::Audio(chunk);
                     if tx_pb.send(msg).is_err() {
                         info!("Playback thread has already stopped.");

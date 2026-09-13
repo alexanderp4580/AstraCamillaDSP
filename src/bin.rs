@@ -75,8 +75,8 @@ use std::net::IpAddr;
 
 use camillalib::{
     CaptureStatus, CommandMessage, ExitState, PlaybackStatus, ProcessingParameters,
-    ProcessingState, ProcessingStatus, SharedConfigs, StatusMessage, StatusStructs, StopReason,
-    list_supported_devices,
+    ProcessingState, ProcessingStatus, SharedConfigs, SpectrumStatus, StatusMessage, StatusStructs,
+    StopReason, list_supported_devices,
 };
 
 const EXIT_BAD_CONFIG: i32 = 101; // Error in config file
@@ -171,6 +171,7 @@ fn run(
         rx_cap,
         rx_pipeconf,
         status_structs.processing.clone(),
+        status_structs.spectrum.clone(),
     );
 
     // Playback thread
@@ -1120,12 +1121,14 @@ fn main_process() -> i32 {
     let processing_status = Arc::new(RwLock::new(ProcessingStatus {
         stop_reason: StopReason::None,
     }));
+    let spectrum_status = Arc::new(RwLock::new(SpectrumStatus::default()));
 
     let status_structs = StatusStructs {
         capture: capture_status.clone(),
         playback: playback_status.clone(),
         processing: processing_params.clone(),
         status: processing_status.clone(),
+        spectrum: spectrum_status.clone(),
     };
     let active_config = Arc::new(Mutex::new(None));
     let previous_config = Arc::new(Mutex::new(None));
@@ -1154,6 +1157,7 @@ fn main_process() -> i32 {
                 playback_status,
                 processing_params,
                 processing_status,
+                spectrum_status,
                 state_change_notify: tx_state,
                 state_file_path: statefilename.clone(),
                 unsaved_state_change: unsaved_state_changes.clone(),

@@ -3,6 +3,12 @@ New features:
 - New "NightMode" processor, for watching films at low volume. Reduces loud effects
   and music while sparing dialogue, with a self-calibrating threshold referenced to
   the dialogue level itself, and no added latency.
+- Websocket clients can now `Subscribe`/`Unsubscribe` to live analysis topics
+  (`Spectrum`, `Energy`) instead of polling. The engine only runs the FFT while a
+  client is subscribed to `Spectrum`, computed post-pipeline so it reflects the
+  actual processed signal. Replaces the earlier approach of running a second
+  CamillaDSP instance purely to fake a spectrum display. See
+  `ANALYSIS-API-PLAN.md`.
 
 Bugfixes:
 - The compressor and noise gate no longer panic when a monitored channel is unused

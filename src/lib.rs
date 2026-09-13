@@ -245,6 +245,93 @@ pub(crate) fn update_playback_signal_status(
     }
 }
 
+/// Live spectrum analysis, computed post-pipeline (see `processing::run_processing`).
+/// `active` gates the FFT itself: nothing runs unless a client has subscribed to the
+/// `Spectrum` topic over the websocket, so the cost is zero when nobody is watching.
+/// `bins_db` is a snapshot the websocket layer pushes to subscribers on `seq` changes;
+/// see `socketserver::push_analysis_frames`.
+#[derive(Clone, Debug)]
+pub struct SpectrumStatus {
+    pub active: bool,
+    pub num_bins: usize,
+    pub fmin: f32,
+    pub fmax: f32,
+    pub bins_db: Vec<f32>,
+    pub seq: u64,
+}
+
+impl Default for SpectrumStatus {
+    fn default() -> Self {
+        SpectrumStatus {
+            active: false,
+            num_bins: 64,
+            fmin: 20.0,
+            fmax: 20_000.0,
+            bins_db: Vec::new(),
+            seq: 0,
+        }
+    }
+}
+
+/// Downmixes `waveforms` to mono, windows and FFTs it, and re-bins the linear-frequency
+/// magnitude spectrum into `spectrum_status`'s log-spaced bins. `fft`/`window`/`mono`/
+/// `scratch` are owned by the caller (the processing thread) and reused across chunks —
+/// only the small `bins_db` result is written behind the lock, same discipline as
+/// `update_playback_signal_status`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_spectrum_status(
+    spectrum_status: &Arc<RwLock<SpectrumStatus>>,
+    fft: &dyn realfft::RealToComplex<PrcFmt>,
+    window: &[PrcFmt],
+    mono: &mut [PrcFmt],
+    spectrum: &mut [num_complex::Complex<PrcFmt>],
+    scratch: &mut [num_complex::Complex<PrcFmt>],
+    waveforms: &[Vec<PrcFmt>],
+    samplerate: usize,
+) {
+    if !spectrum_status.read().active {
+        return;
+    }
+    let frames = mono.len();
+    let nbr_channels = waveforms.len().max(1);
+    for (i, m) in mono.iter_mut().enumerate() {
+        let sum: PrcFmt = waveforms.iter().map(|ch| ch[i]).sum();
+        *m = (sum / nbr_channels as PrcFmt) * window[i];
+    }
+    if fft.process_with_scratch(mono, spectrum, scratch).is_err() {
+        xtrace!("spectrum FFT failed, skipping this chunk");
+        return;
+    }
+    if let Some(mut status) = spectrum_status.try_write() {
+        let num_bins = status.num_bins.max(2);
+        let fmin = status.fmin.max(1.0);
+        let fmax = status.fmax.min(samplerate as f32 / 2.0).max(fmin * 1.01);
+        if status.bins_db.len() != num_bins {
+            status.bins_db.resize(num_bins, -1000.0);
+        }
+        let bin_hz = samplerate as f32 / frames as f32;
+        let ratio = (fmax / fmin).powf(1.0 / (num_bins - 1) as f32);
+        let norm = (frames as PrcFmt) / 2.0;
+        for i in 0..num_bins {
+            let f_lo = fmin * ratio.powf(i as f32 - 0.5);
+            let f_hi = fmin * ratio.powf(i as f32 + 0.5);
+            let lo_idx = (f_lo / bin_hz).floor().max(0.0) as usize;
+            let hi_idx = ((f_hi / bin_hz).ceil() as usize)
+                .min(spectrum.len() - 1)
+                .max(lo_idx);
+            let mut power_sum: PrcFmt = 0.0;
+            for c in &spectrum[lo_idx..=hi_idx] {
+                power_sum += c.re * c.re + c.im * c.im;
+            }
+            let mag = (power_sum / (hi_idx - lo_idx + 1) as PrcFmt).sqrt() / norm;
+            status.bins_db[i] = utils::decibels::linear_to_db(mag as f32);
+        }
+        status.seq = status.seq.wrapping_add(1);
+    } else {
+        xtrace!("spectrum status blocked, skip update");
+    }
+}
+
 #[derive(Debug)]
 pub struct ProcessingParameters {
     // Optimization: volumes are actually `f32`s, but by representing their
@@ -400,6 +487,7 @@ pub struct StatusStructs {
     pub playback: Arc<RwLock<PlaybackStatus>>,
     pub processing: Arc<ProcessingParameters>,
     pub status: Arc<RwLock<ProcessingStatus>>,
+    pub spectrum: Arc<RwLock<SpectrumStatus>>,
 }
 
 pub struct SharedConfigs {
