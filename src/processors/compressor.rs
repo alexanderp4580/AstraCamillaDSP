@@ -109,15 +109,26 @@ impl Compressor {
         }
     }
 
-    /// Sum all channels that are included in loudness monitoring, store result in self.scratch
-    fn sum_monitor_channels(&mut self, input: &AudioChunk) {
-        let ch = self.monitor_channels[0];
-        self.scratch.copy_from_slice(&input.waveforms[ch]);
-        for ch in self.monitor_channels.iter().skip(1) {
-            for (acc, val) in self.scratch.iter_mut().zip(input.waveforms[*ch].iter()) {
-                *acc += *val;
+    /// Sum all channels that are included in loudness monitoring, store result in self.scratch.
+    /// Unused capture channels arrive as empty waveforms, so they are skipped.
+    /// Returns false when no monitored channel carries data.
+    fn sum_monitor_channels(&mut self, input: &AudioChunk) -> bool {
+        let mut summed = false;
+        for ch in self.monitor_channels.iter() {
+            let waveform = &input.waveforms[*ch];
+            if waveform.is_empty() {
+                continue;
+            }
+            if summed {
+                for (acc, val) in self.scratch.iter_mut().zip(waveform.iter()) {
+                    *acc += *val;
+                }
+            } else {
+                self.scratch[..waveform.len()].copy_from_slice(waveform);
+                summed = true;
             }
         }
+        summed
     }
 
     /// Estimate loudness, store result in self.scratch
@@ -167,7 +178,9 @@ impl Processor for Compressor {
 
     /// Apply a Compressor to an AudioChunk, modifying it in-place.
     fn process_chunk(&mut self, input: &mut AudioChunk) -> Res<()> {
-        self.sum_monitor_channels(input);
+        if !self.sum_monitor_channels(input) {
+            return Ok(());
+        }
         self.estimate_loudness();
         self.calculate_linear_gain();
         for ch in self.process_channels.iter() {
