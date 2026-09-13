@@ -1,3 +1,13 @@
+# Unreleased
+New features:
+- New "NightMode" processor, for watching films at low volume. Reduces loud effects
+  and music while sparing dialogue, with a self-calibrating threshold referenced to
+  the dialogue level itself, and no added latency.
+
+Bugfixes:
+- The compressor and noise gate no longer panic when a monitored channel is unused
+  and arrives as an empty waveform.
+
 # 4.1.3
 Bugfixes:
 - Increased capture ringbuffer sizes in CoreAudio, WASAPI, ASIO, and threaded ALSA

@@ -1503,6 +1503,11 @@ pub enum Processor {
         description: Option<String>,
         parameters: RACEParameters,
     },
+    NightMode {
+        #[serde(default)]
+        description: Option<String>,
+        parameters: NightModeParameters,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -1588,6 +1593,136 @@ impl RACEParameters {
 
     pub fn delay_unit(&self) -> TimeUnit {
         self.delay_unit.unwrap_or(TimeUnit::Milliseconds)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct NightModeParameters {
+    pub channels: usize,
+    #[serde(default)]
+    pub amount: Option<PrcFmt>,
+    #[serde(default)]
+    pub max_attenuation: Option<PrcFmt>,
+    #[serde(default)]
+    pub bass_reduction: Option<PrcFmt>,
+    #[serde(default)]
+    pub dialogue_channels: Option<Vec<usize>>,
+    #[serde(default)]
+    pub headroom: Option<PrcFmt>,
+    #[serde(default)]
+    pub ratio: Option<PrcFmt>,
+    #[serde(default)]
+    pub transient_softening: Option<PrcFmt>,
+    #[serde(default)]
+    pub dialogue_protection: Option<PrcFmt>,
+    #[serde(default)]
+    pub presence_gain: Option<PrcFmt>,
+    #[serde(default)]
+    pub presence_frequency: Option<PrcFmt>,
+    #[serde(default)]
+    pub presence_q: Option<PrcFmt>,
+    #[serde(default)]
+    pub attack: Option<PrcFmt>,
+    #[serde(default)]
+    pub release: Option<PrcFmt>,
+    #[serde(default)]
+    pub reference_level: Option<PrcFmt>,
+    #[serde(default)]
+    pub reference_slew: Option<PrcFmt>,
+    #[serde(default)]
+    pub modulation_weight: Option<PrcFmt>,
+    #[serde(default)]
+    pub bass_frequency: Option<PrcFmt>,
+    #[serde(default)]
+    pub silence_threshold: Option<PrcFmt>,
+    #[serde(default)]
+    pub ceiling: Option<PrcFmt>,
+    #[serde(default)]
+    pub monitor_channels: Option<Vec<usize>>,
+    #[serde(default)]
+    pub process_channels: Option<Vec<usize>>,
+}
+
+impl NightModeParameters {
+    pub fn amount(&self) -> PrcFmt {
+        self.amount.unwrap_or(100.0)
+    }
+
+    pub fn max_attenuation(&self) -> PrcFmt {
+        self.max_attenuation.unwrap_or(28.0)
+    }
+
+    pub fn bass_reduction(&self) -> PrcFmt {
+        self.bass_reduction.unwrap_or(10.0)
+    }
+
+    pub fn dialogue_channels(&self) -> Vec<usize> {
+        self.dialogue_channels.clone().unwrap_or_default()
+    }
+
+    pub fn headroom(&self) -> PrcFmt {
+        self.headroom.unwrap_or(0.0)
+    }
+
+    pub fn ratio(&self) -> PrcFmt {
+        self.ratio.unwrap_or(12.0)
+    }
+
+    pub fn transient_softening(&self) -> PrcFmt {
+        self.transient_softening.unwrap_or(100.0)
+    }
+
+    pub fn dialogue_protection(&self) -> PrcFmt {
+        self.dialogue_protection.unwrap_or(60.0)
+    }
+
+    pub fn presence_gain(&self) -> PrcFmt {
+        self.presence_gain.unwrap_or_default()
+    }
+
+    pub fn presence_frequency(&self) -> PrcFmt {
+        self.presence_frequency.unwrap_or(2500.0)
+    }
+
+    pub fn presence_q(&self) -> PrcFmt {
+        self.presence_q.unwrap_or(0.7)
+    }
+
+    pub fn attack(&self) -> PrcFmt {
+        self.attack.unwrap_or(0.15)
+    }
+
+    pub fn release(&self) -> PrcFmt {
+        self.release.unwrap_or(1.5)
+    }
+
+    pub fn reference_slew(&self) -> PrcFmt {
+        self.reference_slew.unwrap_or(0.25)
+    }
+
+    pub fn modulation_weight(&self) -> PrcFmt {
+        self.modulation_weight.unwrap_or(0.5)
+    }
+
+    pub fn bass_frequency(&self) -> PrcFmt {
+        self.bass_frequency.unwrap_or(120.0)
+    }
+
+    pub fn silence_threshold(&self) -> PrcFmt {
+        self.silence_threshold.unwrap_or(-70.0)
+    }
+
+    pub fn ceiling(&self) -> PrcFmt {
+        self.ceiling.unwrap_or(-1.0)
+    }
+
+    pub fn monitor_channels(&self) -> Vec<usize> {
+        self.monitor_channels.clone().unwrap_or_default()
+    }
+
+    pub fn process_channels(&self) -> Vec<usize> {
+        self.process_channels.clone().unwrap_or_default()
     }
 }
 

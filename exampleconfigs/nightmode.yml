@@ -1,0 +1,46 @@
+---
+# Night mode: watching films quietly without losing the dialogue.
+#
+# Reads a wav file and writes a raw file, so the effect can be rendered and
+# measured offline. For live use, replace the capture and playback devices with
+# the real ones and keep the processors and pipeline sections as they are.
+devices:
+  samplerate: 48000
+  chunksize: 1024
+  resampler: null
+  capture:
+    type: WavFile
+    filename: "input.wav"
+  playback:
+    type: File
+    filename: "output.wav"
+    channels: 2
+    format: S32_LE
+    wav_header: true
+
+processors:
+  movienight:
+    type: NightMode
+    parameters:
+      channels: 2
+      # The knob to reach for first. 0 passes audio through untouched, so it is
+      # also the A/B reference.
+      amount: 100
+      # Nothing is ever reduced by more than this, whatever happens.
+      max_attenuation: 28
+      # Low frequencies are what travel through a house at night.
+      bass_reduction: 10
+      # Reduction starts this far above the level of the dialogue itself.
+      headroom: 0
+      ratio: 12.0
+      transient_softening: 100
+      # 0 switches the dialogue detector off and leaves a plain leveler, which is
+      # the comparison to make if the detector ever misjudges your material.
+      dialogue_protection: 60
+      # Off by default. Raise a little if dialogue is still hard to follow at very
+      # low volume, and accept some coloration on voices in exchange.
+      presence_gain: 0.0
+
+pipeline:
+  - type: Processor
+    name: movienight

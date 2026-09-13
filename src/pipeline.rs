@@ -261,6 +261,15 @@ impl Pipeline {
                                 );
                                 Box::new(race) as Box<dyn Processor>
                             }
+                            config::Processor::NightMode { parameters, .. } => {
+                                let night = processors::night_mode::NightMode::from_config(
+                                    &step.name,
+                                    parameters,
+                                    conf.devices.samplerate,
+                                    conf.devices.chunksize,
+                                );
+                                Box::new(night) as Box<dyn Processor>
+                            }
                         };
                         steps.push(PipelineStep::ProcessorStep(proc));
                     }

@@ -439,8 +439,15 @@ impl Biquad {
         out
     }
 
+    /// Replace the filter coefficients, keeping the filter state.
+    pub fn set_coefficients(&mut self, coefficients: BiquadCoefficients) {
+        self.coeffs = coefficients;
+    }
+
     /// Flush stored subnormal numbers to zero.
-    fn flush_subnormals(&mut self) {
+    /// Public because callers using `process_single` must flush themselves,
+    /// it is only done automatically by `process_waveform`.
+    pub fn flush_subnormals(&mut self) {
         if self.s1.is_subnormal() {
             trace!("Biquad filter '{}', flushing subnormal s1", self.name);
             self.s1 = 0.0;
