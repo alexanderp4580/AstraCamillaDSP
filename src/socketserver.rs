@@ -644,15 +644,20 @@ impl SetSocketReadTimeout for TlsStream<TcpStream> {
     }
 }
 
-const ANALYSIS_POLL_INTERVAL: Duration = Duration::from_millis(100);
+// 60fps budget. Spectrum still tops out at the audio chunk rate regardless
+// (~47Hz at the common chunksize=1024 @ 48kHz) since a new FFT result isn't
+// available any faster than that — see the dedup note below. Energy has no
+// such ceiling and now pushes at the full poll rate.
+const ANALYSIS_POLL_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Pushes one `SpectrumFrame`/`EnergyFrame` per subscribed topic on this connection, if
 /// there's anything new. Spectrum dedupes against `SpectrumStatus::seq` — the FFT runs
-/// once per audio chunk (~20ms at typical settings) but this is only polled every
-/// `ANALYSIS_POLL_INTERVAL`, so most polls have nothing new to send. Energy has no
-/// underlying seq counter to compare against (it's just `playback_status`'s existing
-/// rms/peak, unchanged by this feature) so it's sent unconditionally on every poll
-/// while subscribed. Returns `false` if the connection should be closed.
+/// once per audio chunk (~21ms at chunksize=1024/48kHz) but this is polled every
+/// `ANALYSIS_POLL_INTERVAL`, so most polls have nothing new to send once the poll rate
+/// exceeds the chunk rate. Energy has no underlying seq counter to compare against
+/// (it's just `playback_status`'s existing rms/peak, unchanged by this feature) so it's
+/// sent unconditionally on every poll while subscribed. Returns `false` if the
+/// connection should be closed.
 fn push_analysis_frames<S: std::io::Read + std::io::Write>(
     websocket: &mut WebSocket<S>,
     shared_data_inst: &SharedData,
