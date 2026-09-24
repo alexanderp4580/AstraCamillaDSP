@@ -1506,7 +1506,7 @@ pub enum Processor {
     NightMode {
         #[serde(default)]
         description: Option<String>,
-        parameters: NightModeParameters,
+        parameters: Box<NightModeParameters>,
     },
 }
 

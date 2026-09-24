@@ -264,7 +264,7 @@ impl Pipeline {
                             config::Processor::NightMode { parameters, .. } => {
                                 let night = processors::night_mode::NightMode::from_config(
                                     &step.name,
-                                    parameters,
+                                    *parameters,
                                     conf.devices.samplerate,
                                     conf.devices.chunksize,
                                 );

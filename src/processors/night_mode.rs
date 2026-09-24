@@ -1977,7 +1977,7 @@ mod tests {
     fn as_processor_config(params: config::NightModeParameters) -> config::Processor {
         config::Processor::NightMode {
             description: None,
-            parameters: params,
+            parameters: Box::new(params),
         }
     }
 
